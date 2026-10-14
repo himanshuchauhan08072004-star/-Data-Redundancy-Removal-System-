@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Data Redundancy Removal System</title>
+<style>
+  :root{--bg:#f6f7f9;--card:#fff;--text:#1a1d21;--muted:#6b7280;--line:#e5e7eb;--ok:#15803d;--warn:#b45309;--bad:#b91c1c;--blue:#2563eb}
+  @media (prefers-color-scheme:dark){:root{--bg:#0f1115;--card:#181b21;--text:#e8eaed;--muted:#9aa0a6;--line:#2a2e36;--ok:#4ade80;--warn:#fbbf24;--bad:#f87171;--blue:#60a5fa}}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--text);padding:20px}
+  .wrap{max-width:1100px;margin:0 auto}
+  h1{font-size:22px;margin:0 0 4px} p.sub{color:var(--muted);margin:0 0 20px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:20px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px}
+  .stat b{display:block;font-size:26px} .stat span{color:var(--muted);font-size:13px}
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:16px} @media(max-width:800px){.row{grid-template-columns:1fr}}
+  input{width:100%;padding:9px;margin:4px 0 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--text)}
+  button{background:var(--blue);color:#fff;border:0;padding:9px 16px;border-radius:6px;cursor:pointer;font-size:14px}
+  h2{font-size:16px;margin:0 0 12px}
+  table{width:100%;border-collapse:collapse;font-size:13px} th,td{text-align:left;padding:7px 6px;border-bottom:1px solid var(--line)}
+  .tw{overflow-x:auto;max-height:360px;overflow-y:auto}
+  .tag{padding:2px 8px;border-radius:99px;font-size:12px;border:1px solid currentColor}
+  .unique{color:var(--ok)} .false_positive{color:var(--warn)} .redundant{color:var(--bad)} .invalid{color:var(--muted)}
+  #msg{margin-top:10px;font-size:13px;min-height:18px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Data Redundancy Removal System</h1>
+  <p class="sub">Classifies incoming data as unique, false positive, redundant or invalid. Only unique, verified entries reach the database.</p>
+
+  <div class="grid" id="stats"></div>
+
+  <div class="row">
+    <div class="card">
+      <h2>Add single record</h2>
+      <label>Name</label><input id="name" placeholder="Rahul Sharma">
+      <label>Email</label><input id="email" placeholder="rahul@example.com">
+      <label>Phone</label><input id="phone" placeholder="+91 98765 43210">
+      <button onclick="addOne()">Submit</button>
+    </div>
+    <div class="card">
+      <h2>Bulk upload CSV</h2>
+      <p style="color:var(--muted);font-size:13px">Columns: name,email,phone</p>
+      <input type="file" id="csv" accept=".csv">
+      <button onclick="upload()">Upload &amp; process</button>
+      <div id="msg"></div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <h2>Audit log (latest decisions)</h2>
+    <div class="tw"><table><thead><tr><th>Time</th><th>Class</th><th>Action</th><th>Reason</th><th>Data</th></tr></thead><tbody id="audit"></tbody></table></div>
+  </div>
+  <div class="card" style="margin-top:16px">
+    <h2>Stored records (unique &amp; verified)</h2>
+    <div class="tw"><table><thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Phone</th><th>Flag</th></tr></thead><tbody id="records"></tbody></table></div>
+  </div>
+</div>
+<script>
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const $ = id => document.getElementById(id);
+
+async function refresh(){
+  const [s, a, r] = await Promise.all(["stats","audit","records"].map(p => fetch("/api/"+p).then(x => x.json())));
+  $("stats").innerHTML = [
+    ["Submitted", s.total_submitted],["Stored", s.stored_records],["Redundant blocked", s.counts.redundant],
+    ["False positives", s.counts.false_positive],["Invalid", s.counts.invalid],["Redundancy rate", (s.redundancy_rate*100).toFixed(1)+"%"]
+  ].map(([l,v]) => `<div class="card stat"><b>${esc(v)}</b><span>${l}</span></div>`).join("");
+  $("audit").innerHTML = a.map(x => {
+    let p = {}; try{ p = JSON.parse(x.payload) }catch(e){}
+    return `<tr><td>${esc(new Date(x.time).toLocaleString())}</td><td><span class="tag ${esc(x.classification)}">${esc(x.classification)}</span></td><td>${esc(x.action)}</td><td>${esc(x.reason)}</td><td>${esc(p.name)} · ${esc(p.email)}</td></tr>`;
+  }).join("");
+  $("records").innerHTML = r.map(x => `<tr><td>${x.id}</td><td>${esc(x.name)}</td><td>${esc(x.email)}</td><td>${esc(x.phone)}</td><td>${x.flagged_false_positive ? '<span class="tag false_positive">verified distinct</span>' : ''}</td></tr>`).join("");
+}
+
+async function addOne(){
+  const res = await fetch("/api/records",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({name:$("name").value,email:$("email").value,phone:$("phone").value})});
+  const d = await res.json();
+  $("msg").innerHTML = `<span class="tag ${esc(d.classification)}">${esc(d.classification)}</span> ${esc(d.reason)}`;
+  if(res.status===201){ ["name","email","phone"].forEach(i => $(i).value=""); }
+  refresh();
+}
+
+async function upload(){
+  const f = $("csv").files[0]; if(!f){ $("msg").textContent="Pick a CSV first."; return; }
+  const fd = new FormData(); fd.append("file", f);
+  const res = await fetch("/api/upload",{method:"POST",body:fd});
+  const d = await res.json();
+  $("msg").textContent = res.ok ? `Total ${d.total} | inserted ${d.inserted} | rejected ${d.rejected} (redundant ${d.counts.redundant}, invalid ${d.counts.invalid}, false-positive kept ${d.counts.false_positive})` : (d.detail || "Upload failed");
+  refresh();
+}
+refresh();
+</script>
+</body>
+</html>
