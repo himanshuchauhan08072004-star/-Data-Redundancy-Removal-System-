@@ -2,28 +2,46 @@ import csv
 import io
 from pathlib import Path
 
-from fastapi import FastAPI, Depends, UploadFile, File, HTTPException
+from datetime import timezone
+
+from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
-from .database import Base, engine, get_db
-from .models import Record, AuditLog
+from .database import get_db
+from .models import Record, AuditLog, init_db
 from .deduplicator import ingest
 
-Base.metadata.create_all(engine)
+init_db()
 
 app = FastAPI(title="Data Redundancy Removal System", version="1.0.0")
 STATIC = Path(__file__).resolve().parent.parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+MAX_ROWS = 2000  # fuzzy scan is O(n) per row; 5000 rows took ~75 s, too slow for cloud request timeouts
+
+
 class RecordIn(BaseModel):
     name: str = ""
     email: str = ""
     phone: str = ""
+
+    @field_validator("name", "email", "phone", mode="before")
+    @classmethod
+    def _coerce(cls, v):
+        # null / numbers must reach the validator so they are classified + audited,
+        # not rejected by FastAPI before the audit log sees them
+        return "" if v is None else str(v)
+
+
+def iso_utc(dt):
+    """SQLite returns naive datetimes; they are UTC. Always emit an explicit offset."""
+    return (dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt).isoformat()
 
 
 @app.get("/")
@@ -45,8 +63,8 @@ def add_record(body: RecordIn, db: Session = Depends(get_db)):
 
 @app.post("/api/records/bulk")
 def add_bulk(items: list[RecordIn], db: Session = Depends(get_db)):
-    if len(items) > 5000:
-        raise HTTPException(413, "max 5000 records per request")
+    if len(items) > MAX_ROWS:
+        raise HTTPException(413, f"max {MAX_ROWS} records per request")
     return _summarise([ingest(db, i.name, i.email, i.phone) for i in items])
 
 
@@ -54,11 +72,32 @@ def add_bulk(items: list[RecordIn], db: Session = Depends(get_db)):
 async def upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
     if not (file.filename or "").lower().endswith(".csv"):
         raise HTTPException(400, "CSV file required (columns: name,email,phone)")
-    text = (await file.read()).decode("utf-8-sig", errors="replace")
-    rows = list(csv.DictReader(io.StringIO(text)))
-    if len(rows) > 5000:
-        raise HTTPException(413, "max 5000 rows per upload")
-    norm = lambda r: {(k or "").strip().lower(): (v or "") for k, v in r.items()}
+    raw = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, "file too large (max 5 MB)")
+    text = raw.decode("utf-8-sig", errors="replace")
+    if not text.strip():
+        raise HTTPException(400, "CSV is empty (header row required: name,email,phone)")
+
+    header = text.splitlines()[0]
+    delim = max(",;\t|", key=header.count)  # comma, semicolon, tab or pipe
+    try:
+        reader = csv.DictReader(io.StringIO(text), delimiter=delim)
+        fields = [(f or "").strip().lower() for f in (reader.fieldnames or [])]
+        missing = [c for c in ("name", "email") if c not in fields]
+        if missing:
+            raise HTTPException(400, f"missing required column(s): {', '.join(missing)}. "
+                                     f"Found: {', '.join(fields) or 'none'}")
+        rows = list(reader)
+    except csv.Error as exc:
+        raise HTTPException(400, f"unreadable CSV: {exc}")
+    if len(rows) > MAX_ROWS:
+        raise HTTPException(413, f"max {MAX_ROWS} rows per upload")
+
+    def norm(r):
+        return {(k or "").strip().lower(): v for k, v in r.items()
+                if k is not None and isinstance(v, str)}
+
     results = []
     for r in map(norm, rows):
         results.append(ingest(db, r.get("name", ""), r.get("email", ""), r.get("phone", "")))
@@ -79,17 +118,18 @@ def _summarise(results):
 
 
 @app.get("/api/records")
-def list_records(limit: int = 100, offset: int = 0, db: Session = Depends(get_db)):
-    rows = db.scalars(select(Record).order_by(Record.id.desc()).limit(min(limit, 500)).offset(offset))
+def list_records(limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
+                 db: Session = Depends(get_db)):
+    rows = db.scalars(select(Record).order_by(Record.id.desc()).limit(limit).offset(offset))
     return [{"id": r.id, "name": r.name, "email": r.email, "phone": r.phone,
              "flagged_false_positive": r.flagged_false_positive,
-             "created_at": r.created_at.isoformat()} for r in rows]
+             "created_at": iso_utc(r.created_at)} for r in rows]
 
 
 @app.get("/api/audit")
-def audit(limit: int = 100, db: Session = Depends(get_db)):
-    rows = db.scalars(select(AuditLog).order_by(AuditLog.id.desc()).limit(min(limit, 500)))
-    return [{"id": a.id, "time": a.created_at.isoformat(), "classification": a.classification,
+def audit(limit: int = Query(100, ge=1, le=500), db: Session = Depends(get_db)):
+    rows = db.scalars(select(AuditLog).order_by(AuditLog.id.desc()).limit(limit))
+    return [{"id": a.id, "time": iso_utc(a.created_at), "classification": a.classification,
              "action": a.action, "reason": a.reason, "matched_id": a.matched_id,
              "score": a.score, "payload": a.payload} for a in rows]
 

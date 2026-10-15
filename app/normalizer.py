@@ -5,10 +5,22 @@ import unicodedata
 
 
 def norm_name(s: str) -> str:
-    s = unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode()
-    s = re.sub(r"[^a-z\s]", " ", s.lower())
+    """Lowercase letters only, token-sorted. Unicode-aware: non-Latin names
+    (e.g. Devanagari) are kept; accents are folded on Latin letters only."""
+    out: list[str] = []
+    prev = ""
+    for ch in unicodedata.normalize("NFKD", s or ""):
+        cat = unicodedata.category(ch)
+        if cat == "Mn" and prev.isascii() and prev.isalpha():
+            continue  # José -> jose
+        if cat[0] in ("L", "M"):
+            out.append(ch.casefold())
+            prev = ch
+        else:
+            out.append(" ")  # digits, punctuation, whitespace
+            prev = ""
     # token-sorted so "Singh Rahul" == "Rahul Singh"
-    return " ".join(sorted(s.split()))
+    return " ".join(sorted("".join(out).split()))
 
 
 def norm_email(s: str) -> str:

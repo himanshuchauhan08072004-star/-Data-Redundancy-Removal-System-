@@ -1,6 +1,6 @@
 venv/
 __pycache__/
 *.pyc
-data.db
+*.db
 .env
 .pytest_cache/

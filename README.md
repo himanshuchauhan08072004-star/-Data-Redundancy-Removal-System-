@@ -14,7 +14,8 @@ Every submission goes through this pipeline (`app/deduplicator.py`):
 6. **False-positive verification**: similar name (>= 0.85) but different email and phone -> verified as a different person, inserted and flagged `false_positive`.
 7. Otherwise -> `unique`, inserted.
 8. **DB constraints** (unique `fingerprint`, unique `email_norm`) catch race conditions from concurrent requests.
-9. Every decision (accepted or rejected) is written to `audit_log`.
+9. An in-process lock serialises classify+insert so near-duplicate checks cannot race inside one instance.
+10. Every decision (accepted or rejected) is written to `audit_log`.
 
 ## Run locally (Windows PowerShell)
 
@@ -28,7 +29,7 @@ uvicorn app.main:app --reload
 
 Open http://127.0.0.1:8000 (dashboard) or http://127.0.0.1:8000/docs (Swagger).
 
-Run tests:
+Run tests (56 tests; SQLite by default, or set `DATABASE_URL` to run them on PostgreSQL):
 
 ```powershell
 python -m pytest -q
@@ -39,8 +40,8 @@ python -m pytest -q
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/api/records` | Add one record. 201 inserted, 409 redundant, 422 invalid |
-| POST | `/api/records/bulk` | JSON array of records |
-| POST | `/api/upload` | CSV upload (`name,email,phone`) |
+| POST | `/api/records/bulk` | JSON array of records (max 2000) |
+| POST | `/api/upload` | CSV upload, `name,email` required, `phone` optional, max 2000 rows / 5 MB, delimiter `, ; tab |` auto-detected |
 | GET | `/api/records` | Stored unique records |
 | GET | `/api/audit` | Decision log |
 | GET | `/api/stats` | Counts + redundancy rate |
@@ -70,6 +71,11 @@ Render/Railway: connect the GitHub repo, start command `uvicorn app.main:app --h
 
 Upload `sample_data.csv` from the dashboard: 13 rows -> duplicates, near duplicates, false positives and invalid rows are each handled and logged.
 
-## Limitation
+## Known limitations
 
-The fuzzy scan compares against all stored rows (O(n)). For millions of rows, add blocking (e.g. by email domain or name prefix) or a trigram index in PostgreSQL (`pg_trgm`).
+- False positives are flagged and visible in the records table, but there is no review/merge/undo action yet.
+- Near-duplicate (fuzzy) races across several server instances are not DB-enforced; exact email/phone/fingerprint duplicates are.
+- No authentication or rate limiting.
+- Bulk uploads are capped at 2000 rows (about 15 s on SQLite) because the fuzzy scan is O(n) per row.
+
+- The fuzzy scan compares against all stored rows (O(n)). For large tables, add blocking (e.g. by name prefix) or a trigram index in PostgreSQL (`pg_trgm`).
