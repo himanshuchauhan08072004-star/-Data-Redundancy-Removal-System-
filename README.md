@@ -1,4 +1,4 @@
-# CodeAlpha_DataRedundancyRemovalSystem
+# CodeAlpha_Data Redundancy Removal System
 
 CodeAlpha Cloud Computing Internship, Task 1. A cloud-ready API + dashboard that classifies incoming data as **unique**, **false positive**, **redundant** or **invalid**, and appends only unique, verified entries to the database.
 
